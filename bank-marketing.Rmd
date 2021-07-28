@@ -1,0 +1,1007 @@
+---
+title: "Bank Marketing: Predicting results of telemarketing campaigns"
+author: "Alex V. Hadar"
+date: "7/28/2021"
+output: pdf_document
+bibliography: biblio.bib
+nocite: '@irizarry2019introduction'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width="50%")
+```
+
+## Introduction
+
+Using analytics to predict the target groups or the success of marketing campaigns
+and product acquisition is a widely used method in the banking and e-commerce/retail
+industries. The decision predicted for a (potential) customer is based on customer data
+and information from previous campaigns, but also on domain knowledge shared between the stakeholders of the analysis.
+
+We analyze data from the telemarketing campaign collected by a bank in Portugal. This data, provided by Moro et al. (see @moro2014data), is available in the UCI repository under 
+<https://archive.ics.uci.edu/ml/machine-learning-databases/00222/bank.zip>. 
+It includes customer personal information and data on past campaigns for the customers.
+
+We use several classification models and algorithms to predict the outcome: customer accepts ("yes") or rejects the term deposit offer ("no"). 
+Then the results are interpreted according to the desired business outcome: 
+predict customers who are more likely to subscribe to the deposit.
+
+
+## Analysis
+
+We start the analysis with a summary, followed by the visual exploration of the telemarketing data.
+In the next steps, we explore different classification models and find those which best suit the business purpose.
+To measure the model performance, we use the confusion matrix - especially accuracy and specificity -  
+and related values, like balanced accuracy or F-score.
+
+### Exploratory data analysis (EDA) 
+
+The bank marketing dataset can be downloaded and unpacked using the following code:
+
+```{r load-lib, echo=FALSE, message=FALSE}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(RColorBrewer)) install.packages("RColor.Brewer", repos = "http://cran.us.r-project.org")
+if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org")
+if(!require(e1071)) install.packages("e1071", repos = "http://cran.us.r-project.org")
+if(!require(tinytex)) install.packages("tinytex", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+library(RColorBrewer)
+library(randomForest)
+library(e1071)
+library(tinytex)
+```
+
+
+```{r download-data, message=FALSE}
+# Bank Marketing dataset:
+# https://archive.ics.uci.edu/ml/datasets/bank+marketing 
+# https://archive.ics.uci.edu/ml/machine-learning-databases/00222/bank.zip
+
+dl <- tempfile()
+download.file("https://archive.ics.uci.edu/ml/machine-learning-databases/00222/bank.zip", 
+                dl)
+bank <- read_csv2(unzip(dl, "bank-full.csv"))
+bank.small <- read_csv2(unzip(dl, "bank.csv")) # small dataset: 10% of "bank-full.csv"
+# bank <- read_csv2("bank-full.csv")
+# bank.small <- read_csv2("bank.csv")
+# convert to data frame
+bank <- as.data.frame(bank)
+bank.small <- as.data.frame(bank.small)
+```
+
+The data consists of `r nrow(bank)` observations for 17 variables collected during 5 years.  
+The predictors are both numerical (e.g. age, balance, duration) and discrete/categorical (e.g. job, marital, education, 
+housing, poutcome); the outcome is categorical ("yes"/"no").  
+
+More details can be found in the dataset description at the UCI repository.
+
+```{r make-factors, echo=FALSE, message=FALSE, results=FALSE}
+# convert character columns to factors
+colnames(bank)
+cols_char <- c("job", "marital", "education", "default", "housing", "loan", "contact", 
+                 "month", "poutcome",  "y")
+bank[cols_char] <- lapply(bank[cols_char], as.factor)
+bank.small[cols_char] <- lapply(bank.small[cols_char], as.factor)
+```
+
+```{r summary-data, echo=FALSE, message=FALSE}
+summary(bank)
+```
+
+
+As mentioned by the authors of the dataset, the distribution of the outcome variable _y_ shows that the data is not balanced:
+78% "no" responses, 12% "yes" responses. This situation is encountered often in real-world data. To correct the imbalance a number of approaches have been proposed (see @fawcett2016imbalance):  
+
+* undersampling  
+* upsampling  
+* weighting  
+
+We will use undersampling to generate a more balanced dataset in the modeling part, but the alternatives
+are also useful. Then, models will run on the original dataset and on the balanced dataset in order to compare the performance metrics.
+
+For the purpose of analysis and modeling we split the data into training and test data, with 90% allocated to training, 10% to test. 
+In case of small datasets, a higher percentage of test data might be useful, but this dataset includes sufficient data for training and then evaluation on the remaining 10%.
+
+```{r split-train-test, echo=FALSE, message=FALSE, warning=FALSE}
+# train-test split
+# Validation set will be 10% of bank data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = bank$y, times = 1, p = 0.1, list = FALSE)
+train.bank <- bank[-test_index,]
+test.bank <- bank[test_index,]
+
+# clean up - remove unused objects
+rm(dl, test_index, bank)
+# save training and test set 
+saveRDS(train.bank, "train.bank.Rda")
+saveRDS(test.bank, "test.bank.Rda")
+```
+
+```{r clean-up-reload, echo=FALSE, message=FALSE, results=FALSE}
+# clean up - not mandatory, because the data is not very large
+rm(train.bank, test.bank)
+gc()
+
+# load saved data, if not in workspace already
+train.bank <- readRDS("train.bank.Rda")
+test.bank <- readRDS("test.bank.Rda")
+```
+
+Additionally, there are unknown values for some variables. These will be described below and will be treated 
+as a category by themselves (no imputation for missing values).
+
+
+The next step is the visual exploration of the training data.  
+
+For the given features we could do feature selection, but this is out of scope for this analysis. 
+However, based on domain knowledge we would expect balance, age, housing, loan, duration of contact 
+and previous outcome to influence the prediction.
+
+#### Numerical data  
+
+
+The age histogram shows mean and median close together, the distribution is right skewed.
+
+```{r num-age, echo=FALSE, message=FALSE}
+# age
+train.bank %>% ggplot(aes(x = age)) + geom_histogram(bins = 20)
+train.bank %>% ggplot(aes(y = age)) + geom_boxplot()
+```
+
+The balance distribution is strongly right skewed with many outliers.
+
+```{r num-balance, echo=FALSE, message=FALSE}
+# balance
+train.bank %>% ggplot(aes(x = balance)) + geom_histogram(bins = 30)
+train.bank %>% ggplot(aes(y = balance)) + geom_boxplot()
+```
+
+The contact duration data is also right skewed with many outliers.
+
+```{r num-duration, echo=FALSE, message=FALSE}
+# duration
+train.bank %>% ggplot(aes(x = duration)) + geom_histogram(bins = 50)
+train.bank %>% ggplot(aes(y = duration)) + geom_boxplot()
+```
+
+The same right skew is visible for the campaign data, which stores the number of contacts performed during this campaign and for this client.
+
+```{r num-campaign, echo=FALSE, message=FALSE}
+# campaign
+train.bank %>% ggplot(aes(x = campaign)) + geom_histogram(bins = 30)
+train.bank %>% ggplot(aes(y = campaign)) + geom_boxplot()
+```
+
+The pdays data consists of many -1 values and is right skewed with outliers. It stores the number of days that passed by after the client was last contacted. Here, -1 means the client was not previously contacted.
+
+```{r num-days, echo=FALSE, message=FALSE}
+# pdays
+train.bank %>% ggplot(aes(x = pdays)) + geom_histogram(bins = 30)
+train.bank %>% ggplot(aes(y = pdays)) + geom_boxplot()
+# mostly -1 values, right skew with outliers
+```
+
+The outliers are still present when removing the -1 values.
+
+```{r num-days-selected, echo=FALSE, message=FALSE}
+# check without -1 entries
+train.bank %>% filter(pdays > -1) %>% ggplot(aes(x = pdays)) + geom_histogram(bins = 30)
+train.bank %>% filter(pdays > -1) %>% ggplot(aes(y = pdays) ) + geom_boxplot()
+# train.bank %>% filter(pdays > -1) %>% pull(pdays) %>% mean()
+```
+
+The "previous" variable is similar to the pdays variable from above, except that 0 values are used instead of -1. It stores the number of contacts performed before this campaign and for this client
+
+```{r num-previous, echo=FALSE, message=FALSE}
+# previous
+train.bank %>% ggplot(aes(x = previous)) + geom_histogram(bins = 30)
+train.bank %>% ggplot(aes(y = previous)) + geom_boxplot()
+# check without 0 entries
+train.bank %>% filter(previous > 0) %>% ggplot(aes(x = previous)) + geom_histogram(bins = 30)
+train.bank %>% filter(previous > 0) %>% ggplot(aes(y = previous) ) + geom_boxplot()
+```
+
+#### Categorical data  
+
+
+Most people work in blue-collar jobs, management, technician, admin and services.
+
+```{r cat-job, echo=FALSE, message=FALSE, fig.align='center'}
+# job
+train.bank %>% ggplot(aes(x = job)) + geom_bar(aes(fill = job)) + 
+         theme(axis.text.x = element_text(angle=80, hjust=1))
+```
+
+Most people in the dataset are married.
+
+```{r cat-marital, echo=FALSE, message=FALSE, fig.align='center'}
+# marital
+train.bank %>% ggplot(aes(x = marital)) + geom_bar(aes(fill = marital))
+```
+
+Most people completed at least secondary education.
+```{r cat-education, echo=FALSE, message=FALSE, fig.align='center'}
+# education
+train.bank %>% ggplot(aes(x = education)) + geom_bar(aes(fill = education))
+```
+
+The majority of people did not default.
+
+```{r cat-default, echo=FALSE, message=FALSE, fig.align='center'}
+# default
+train.bank %>% ggplot(aes(x = default)) + geom_bar(aes(fill = default))
+# most persons did not default
+```
+
+More than half of the people have housing loans, but the proportions are more similar than in other factors (55% yes versus 45% no).
+
+```{r cat-housing, echo=FALSE, message=FALSE, fig.align='center'}
+# housing
+table(train.bank$housing)
+
+train.bank %>% ggplot(aes(x = housing)) + geom_bar(aes(fill = housing))
+```
+
+Most people do not have personal loans.
+
+```{r cat-loans, echo=FALSE, message=FALSE, fig.align='center'}
+# loan
+train.bank %>% ggplot(aes(x = loan)) + geom_bar(aes(fill = loan))
+```
+
+Most people were contacted using cellular (mobile phones), but the number of unknown values is relatively high.
+
+```{r cat-contact, echo=FALSE, message=FALSE, fig.align='center'}
+# contact
+train.bank %>% ggplot(aes(x = contact)) + geom_bar(aes(fill = contact))
+```
+
+Most people were contacted during May, July, June and August, the fewest during December and March.
+
+```{r cat-month, echo=FALSE, message=FALSE, fig.align='center'}
+# month
+train.bank %>% ggplot(aes(x = month)) + geom_bar(aes(fill = month))
+```
+
+Previous outcome is mostly failure for known data, but most of the entries are unknown. 
+
+```{r cat-prev-outcome, echo=FALSE, message=FALSE, fig.align='center'}
+# poutcome
+train.bank %>% ggplot(aes(x = poutcome)) + geom_bar(aes(fill = poutcome))
+```
+
+Most people were contacted during on 18th, 19th and 20th, the fewest on 1st, 10th and 24th day of the month.
+
+```{r cat-day-factor, echo=FALSE, message=FALSE, fig.align='center'}
+# (day as factor)
+train.bank %>% ggplot(aes(x = as.factor(day))) + geom_bar(aes(fill = as.factor(day)))
+```
+
+For the dependent variable, the outcome _y_, there are more "no" than "yes" values.
+
+```{r cat-y-outcome, echo=FALSE, message=FALSE, fig.align='center'}
+# y (dependent variable)
+train.bank %>% ggplot(aes(x = y)) + geom_bar(aes(fill = y))
+# more "no" than "yes" outcomes
+```
+
+#### Bivariate plots  
+
+
+When looking at the relationships between the features and the outcome _y_, we find the following aspects:
+
+The median age for "yes" answers is slightly lower, but the data is spread wider.
+
+```{r age-y, echo=FALSE, message=FALSE, fig.align='center'}
+# y and numeric variables
+train.bank %>% group_by(y)  %>% ggplot(aes(y = age, x = y))+ geom_boxplot(aes(fill = y))
+```
+
+The balance distribution is similar for "yes" and "no", except higher outliers for "no".
+
+```{r balance-y, echo=FALSE, message=FALSE, fig.align='center'}
+train.bank %>% group_by(y)  %>% ggplot(aes(y = balance, x = y))+ geom_boxplot(aes(fill = y))
+```
+
+The median duration is higher for "yes" than for "no", even if we consider the wider spread of the data.
+This suggests that contact duration is a significant factor for the predicted outcome.
+
+```{r duration-y, echo=FALSE, message=FALSE, fig.align='center'}
+train.bank %>% group_by(y)  %>% ggplot(aes(y = duration, x = y))+ geom_boxplot(aes(fill = y)) # important feature
+```
+
+The campaign distribution is similar for "yes" and "no", except higher outliers for "no".
+
+```{r campaign-y, echo=FALSE, message=FALSE, fig.align='center'}
+train.bank %>% group_by(y)  %>% ggplot(aes(y = campaign, x = y))+ geom_boxplot(aes(fill = y))
+```
+
+The pdays values for "yes" have wider spread.
+
+```{r pdays-y, echo=FALSE, message=FALSE, fig.align='center'}
+train.bank %>% group_by(y)  %>% ggplot(aes(y = pdays, x = y))+ geom_boxplot(aes(fill = y)) 
+```
+
+The "previous" distribution is similar for "yes" and "no", except one high outlier for "no".
+
+```{r previous-y, echo=FALSE, message=FALSE, fig.align='center'}
+train.bank %>% group_by(y)  %>% ggplot(aes(y = previous, x = y))+ geom_boxplot(aes(fill = y))
+```
+
+While married people are the majority in both groups, single persons said "yes" more often.
+
+```{r marital-y, echo=FALSE, message=FALSE}
+# y and categorical variables
+# marital status
+# grouped bar chart
+train.bank %>% ggplot(aes(x = y, fill = marital))+ geom_bar(position = "dodge")
+# segmented bar chart (adds up to 100%)
+train.bank %>% ggplot(aes(x = y, fill = marital))+ geom_bar(position = "fill")
+```
+
+People with secondary-education are the majority in both groups.
+Tertiary-educated people said "yes" more often as proportion of answers, but primary-educated said "no" more often.
+
+```{r education-y, echo=FALSE, message=FALSE}
+# education
+# grouped bar chart
+train.bank %>% ggplot(aes(x = y, fill = education))+ geom_bar(position = "dodge")
+# segmented bar chart (adds up to 100%)
+train.bank %>% ggplot(aes(x = y, fill = education))+ geom_bar(position = "fill")
+```
+
+The majority of "yes" come from persons which did not default, but the situation is similar for "no" answers.
+
+```{r default-y, echo=FALSE, message=FALSE}
+# default status
+table(train.bank$y, train.bank$default)
+# grouped bar chart
+train.bank %>% ggplot(aes(x = y, fill = default))+ geom_bar(position = "dodge")
+# segmented bar chart (adds up to 100%)
+train.bank %>% ggplot(aes(x = y, fill = default))+ geom_bar(position = "fill")
+```
+
+Most "yes" answers come from persons with no housing loans, while most "no" answers come from persons with housing loans.
+This seems aligned with the purpose of finding new customers.
+
+```{r housing-y, echo=FALSE, message=FALSE}
+# housing
+# grouped bar chart
+train.bank %>% ggplot(aes(x = y, fill = housing))+ geom_bar(position = "dodge")
+# segmented bar chart (adds up to 100%)
+train.bank %>% ggplot(aes(x = y, fill = housing))+ geom_bar(position = "fill")
+```
+
+The majority of "yes" answers come from persons who do not have a loan. This seems aligned with the purpose of finding new customers.
+
+```{r loan-y, echo=FALSE, message=FALSE}
+# loan
+# grouped bar chart
+train.bank %>% ggplot(aes(x = y, fill = loan))+ geom_bar(position = "dodge")
+# segmented bar chart (adds up to 100%)
+train.bank %>% ggplot(aes(x = y, fill = loan))+ geom_bar(position = "fill")
+```
+
+Most "yes" answers come from persons contacted via cellular(mobile phone).
+
+```{r contact-y, echo=FALSE, message=FALSE}
+# contact
+# grouped bar chart
+train.bank %>% ggplot(aes(x = y, fill = contact))+ geom_bar(position = "dodge")
+# segmented bar chart (adds up to 100%)
+train.bank %>% ggplot(aes(x = y, fill = contact))+ geom_bar(position = "fill")
+```
+
+Many "yes" answers come from persons who had succesful previous outcomes. This might be related to a higher trust factor, but this is outside the scope of the analysis.
+
+```{r prev-outcome-y, echo=FALSE, message=FALSE}
+# poutcome
+# grouped bar chart
+train.bank %>% ggplot(aes(x = y, fill = poutcome))+ geom_bar(position = "dodge")
+# segmented bar chart (adds up to 100%)
+train.bank %>% ggplot(aes(x = y, fill = poutcome))+ geom_bar(position = "fill")
+```
+
+The highest proportion of yes is in March, Dec, Oct, Sep - these are months when  fewer calls are made.
+During months with the highest number of calls, the proportion is relatively constant.
+
+```{r month-y, echo=FALSE, message=FALSE}
+# month
+# grouped bar chart
+train.bank %>% ggplot(aes(x = y, fill = month))+ geom_bar(position = "dodge")
+# segmented bar chart (adds up to 100%)
+# y outcome by month (proportion)
+train.bank %>% ggplot(aes(x = month, fill = y))+ geom_bar(position = "fill")
+```
+
+The highest proportion of yes is on the 1st, 10th and 30th of the month.
+While the 1st and 10th are days with fewer calls, the 30th is a day with many calls.
+
+```{r day-factor-y, echo=FALSE, message=FALSE}
+# (day as factor)
+# grouped bar chart
+train.bank %>% ggplot(aes(x = y, fill = as.factor(day)))+ geom_bar(position = "dodge")
+# segmented bar chart (adds up to 100%)
+# y outcome by day (proportion)
+train.bank %>% ggplot(aes(x = as.factor(day), fill = y))+ geom_bar(position = "fill")
+```
+
+#### Correlation  
+
+
+When looking at the correlation between numeric variables and the outcome _y_, we find a stronger positive correlation 
+for duration, pdays, and previous.
+
+```{r cor-num-y, echo=FALSE, message=FALSE}
+# get numeric columns
+cols_num <- colnames(train.bank) [!(colnames(train.bank) %in% cols_char)]
+# get correlation between the variables and the outcome y
+cor(train.bank[, cols_num], as.numeric(train.bank$y))
+```
+
+
+### Models
+
+### Preparation: Undersampling to improve data balance
+
+As noted previously, the dataset is imbalanced, including only ~12% "yes" outcomes. These outcomes, however, are the relevant ones from a business perspective. Acquiring new customers or extending the product range for existing customers are the goals of sales/marketing campaigns. In data with few observations for a specific class, learning the features which describe this class is more difficult than in data where each class has approximately the same number of observations. The reason is that similar features will be present in the other predominant classes. This makes it harder to distinguish the relevant features.
+
+We generate a more balanced dataset by undersampling and use this for modeling along with the original dataset: 
+the new dataset will include the "yes" outcomes and a similar number of "no" outcomes sampled from the original dataset.
+
+```{r undersample-more-balanced, warning=FALSE, message=FALSE}
+# generate reduced, more balanced dataset
+# split data by outcome
+train.yes <- train.bank %>% filter(y == "yes")
+train.no <- train.bank %>% filter(y == "no")
+# undersample the "no" data to match the amount of "yes" data
+set.seed(1, sample.kind="Rounding")
+ssize <- dim(train.yes)[1] # get size of the "yes" data
+# (alternatively - not done here: round size up to the nearest thousand)
+rows.no <- sample(rownames(train.no), size = ssize, replace = FALSE) # sampled "no" data
+reduced.no <- train.no[rows.no, ]
+# merge yes and no data in a new, more balanced dataset
+train.balanced <- rbind(train.yes, reduced.no)
+summary(train.balanced)
+```
+
+
+### Majority class for customers
+
+A very simple model predicts "no" (the majority class) for each outcome.
+
+The proportion of "no" outcomes is `r mean(train.bank$y == "no")` in the original training set, 
+`r mean(train.balanced$y == "no")` in the more balanced dataset and `r mean(test.bank$y == "no")` in the test set.
+
+```{r model-majority-class, warning=FALSE, message=FALSE, results=FALSE}
+# simple model: always predict "no" - original dataset
+mean(train.bank$y == "no") # 0.883
+mean(test.bank$y == "no") # 0.883
+
+# simple model: always predict "no" - balanced dataset
+mean(train.balanced$y == "no")
+mean(test.bank$y == "no") # 0.883
+```
+
+Model performance is determined using the confusion matrix and stored:
+
+```{r model-majority-confmat, warning=FALSE, message=FALSE}
+# helper function which adds a row to the results dataframe
+add_result <- function(result_df, meth, cmat, fscore){
+  result_df <- bind_rows(result_df,
+                         data.frame(method = meth,  acc = cmat$overall[["Accuracy"]], 
+                           sens = cmat$byClass[["Sensitivity"]], sp = cmat$byClass[["Specificity"]], 
+                           balanced.acc = cmat$byClass[["Balanced Accuracy"]] , Fscore = fscore))
+  result_df
+}
+
+n <- length(test.bank$y)
+# "trick" to generate y_hat with one value but two factor levels: 
+# create with one value of another level, then remove it
+y_hat_naive <- as.factor( rep( c("no", "yes"), c(n, 1) ) )
+y_hat_naive <- y_hat_naive[1:n]
+cmat_naive <- confusionMatrix(y_hat_naive, test.bank$y)
+# F-score
+f_naive <- F_meas(data = y_hat_naive, reference = test.bank$y) 
+
+# original dataset
+model_results <- data.frame(method = "Always no (one class)",  acc = cmat_naive$overall[["Accuracy"]], 
+                   sens = cmat_naive$byClass[["Sensitivity"]], sp = cmat_naive$byClass[["Specificity"]], 
+                   balanced.acc = cmat_naive$byClass[["Balanced Accuracy"]] , Fscore = f_naive)
+
+# more balanced dataset
+model_results_bal <- data.frame(method = "Always no (one class)",  acc = cmat_naive$overall[["Accuracy"]], 
+                       sens = cmat_naive$byClass[["Sensitivity"]], sp = cmat_naive$byClass[["Specificity"]], 
+                       balanced.acc = cmat_naive$byClass[["Balanced Accuracy"]] , Fscore = f_naive)
+```
+
+
+### Confusion matrix interpretation 
+
+In order to better understand the confusion matrix and what metrics are relevant for all models,
+we analyze the matrix for this simple model.
+
+```{r confmat-example, warning=FALSE, message=FALSE}
+cmat_naive
+```
+
+The model has high accuracy, even though no "yes" reference answer is guessed correctly.
+This seems unusual at first, but all "no" reference answers are guessed correctly, which is shown 
+in sensitivity 1.0 and high accuracy.
+
+The absence of correct "yes" answers is reflected by specificity 0.0 and overall balanced accuracy of only 0.5.
+Note that in R the 'Positive' class for the confusion matrix is "no". This means, accuracy is not the most suitable
+metric for model evaluation in this scenario: specificity and balanced accuracy are better choices.
+
+
+### Logistic regression model
+
+For classification problems with binary outcome (yes/no) logistic regression is 
+the usual, efficient choice. The model yields a prediction based on probability. A probability threshold is used for "yes"/"no" decision.
+
+For the original data we have:
+
+```{r model-logistic-reg-orig, warning=FALSE, message=FALSE}
+# logistic regression (with all variables) - original dataset
+set.seed(1, sample.kind = "Rounding")
+fit_glm <- train(y ~ ., method = "glm", data = train.bank)
+y_hat_glm <- predict(fit_glm, test.bank, type = "raw")
+confusionMatrix(y_hat_glm, test.bank$y)$overall[["Accuracy"]] # 0.9029191
+# but yes is detected in too few cases (low specificity: 0.3762) - due to data imbalance
+cmat_glm <- confusionMatrix(y_hat_glm, test.bank$y)
+# F-score
+f_glm <- F_meas(data = y_hat_glm, reference = test.bank$y) 
+
+model_results <- add_result(model_results,"Logistic Regression", cmat_glm, f_glm)
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# store the results to use in ensemble
+y_hat_glm_orig <- y_hat_glm
+```
+
+For the more balanced data we find:
+
+```{r model-logistic-reg-bal, warning=FALSE, message=FALSE}
+# logistic regression (with all variables) - balanced dataset
+set.seed(1, sample.kind = "Rounding")
+fit_glm <- train(y ~ ., method = "glm", data = train.balanced)
+y_hat_glm <- predict(fit_glm, test.bank, type = "raw")
+confusionMatrix(y_hat_glm, test.bank$y)$overall[["Accuracy"]] # 0.8427687
+# yes is detected in many cases (high specificity: 0.8318) - due to better data balance
+cmat_glm <- confusionMatrix(y_hat_glm, test.bank$y)
+# F-score
+f_glm <- F_meas(data = y_hat_glm, reference = test.bank$y) 
+
+model_results_bal <- add_result(model_results_bal,"Logistic Regression", cmat_glm, f_glm)
+```
+
+### Classification/Decision tree and Random forest models
+
+Classification trees and random forests are another popular choice for this type of problem.
+Trees provide models that are relatively easy to explain. 
+Random forests average predictions over multiple trees and can generate a more reliable prediction. The random forest model also provides a ranking of feature importance for the chosen model, which can be used to better understand the classification mechanism. 
+Both model types can detect non-linear relationships in the data.
+
+#### Classification tree  
+
+
+For the original dataset we have:
+
+```{r model-tree-orig, warning=FALSE, message=FALSE}
+# decision trees - original dataset
+set.seed(10, sample.kind = "Rounding")
+fit_cl_tree <- train(y ~ ., method = "rpart", data = train.bank, 
+                       tuneGrid = data.frame(cp = seq(0, 0.05, 0.002)))
+ggplot(fit_cl_tree, highlight = TRUE)
+# fit_cl_tree$bestTune # cp = 0.002 -> optimal value for the complexity parameter
+y_hat_cl_tree <- predict(fit_cl_tree, test.bank, type = "raw")
+confusionMatrix(y_hat_cl_tree, test.bank$y)$overall["Accuracy"] # 0.9071207
+# but yes is detected in too few cases (low specificity: 0.4234) - due to data imbalance
+cmat_tree <- confusionMatrix(y_hat_cl_tree, test.bank$y)
+# fit_cl_tree$finalModel
+```
+
+```{r model-tree-orig-plot-res, warning=FALSE, message=FALSE, out.width="70%"}
+# plot the tree
+plot(fit_cl_tree$finalModel, margin = 0.1)
+text(fit_cl_tree$finalModel, cex = 0.75)
+# F-score
+f_tree <- F_meas(data = y_hat_cl_tree, reference = test.bank$y) 
+
+model_results <- add_result(model_results, "Classification Tree", cmat_tree, f_tree)
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# store the results to use in ensemble
+y_hat_cl_tree_orig <- y_hat_cl_tree
+```
+
+
+For the more balanced dataset we have:
+
+```{r model-tree-bal, warning=FALSE, message=FALSE}
+# decision trees - balanced dataset
+set.seed(10, sample.kind = "Rounding")
+fit_cl_tree <- train(y ~ ., method = "rpart", data = train.balanced, tuneGrid = data.frame(cp = seq(0, 0.05, 0.002)))
+ggplot(fit_cl_tree, highlight = TRUE)
+# fit_cl_tree$bestTune # cp = 0.002 -> optimal value for the complexity parameter
+y_hat_cl_tree <- predict(fit_cl_tree, test.bank, type = "raw")
+confusionMatrix(y_hat_cl_tree, test.bank$y)$overall["Accuracy"] # 0.8318
+# yes is detected in many cases (high specificity: 0.8904) - due to better data balance
+cmat_tree <- confusionMatrix(y_hat_cl_tree, test.bank$y)
+# fit_cl_tree$finalModel
+```
+
+```{r model-tree-bal-plot-res, warning=FALSE, message=FALSE, out.width="70%"}
+# plot the tree
+plot(fit_cl_tree$finalModel, margin = 0.1)
+text(fit_cl_tree$finalModel, cex = 0.75)
+# F-score
+f_tree <- F_meas(data = y_hat_cl_tree, reference = test.bank$y) 
+
+model_results_bal <- add_result(model_results_bal, "Classification Tree", cmat_tree, f_tree)
+```
+
+
+#### Random forest  
+
+
+The model requires a large amount of computing time and memory if we use the original dataset. 
+Therefore only a subset of the original data was used for training.  
+
+```{r model-random-forest-orig, warning=FALSE, message=FALSE}
+# random forest (classification) -> warning: long runtime - original dataset
+set.seed(14, sample.kind = "Rounding")
+# fit_rf <- train(y ~ ., method = "rf", data = train.bank, tuneGrid = data.frame(mtry = seq(1, 7)), ntree = 100)
+# training with reduced dataset (bank.small)
+fit_rf <- train(y ~ ., method = "rf", data = bank.small, tuneGrid = data.frame(mtry = seq(1, 10)), 
+                  ntree = 100)
+ggplot(fit_rf, highlight = TRUE)
+# fit_rf$bestTune # mtry = 8 -> optimal value for mtry parameter
+y_hat_rf <- predict(fit_rf, test.bank, type = "raw")
+confusionMatrix(y_hat_rf, test.bank$y)$overall["Accuracy"] # 0.9170721
+cmat_rf <- confusionMatrix(y_hat_rf, test.bank$y)
+# but yes is detected in too few cases (low specificity: 0.4783) - due to data imbalance
+# importance of variables in the random forest model
+imp <- varImp(fit_rf)
+imp
+# F-score
+f_rf <- F_meas(data = y_hat_rf, reference = test.bank$y) 
+
+model_results <- add_result(model_results, "Random Forest",  cmat_rf, f_rf)
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# store the results to use in ensemble
+y_hat_rf_orig <- y_hat_rf
+```
+
+The more balanced dataset is smaller and has lower resource usage.
+
+```{r model-random-forest-bal, warning=FALSE, message=FALSE}
+# random forest (classification) -> warning: long runtime - balanced dataset
+set.seed(14, sample.kind = "Rounding")
+# training with balanced dataset
+fit_rf <- train(y ~ ., method = "rf", data = train.balanced, tuneGrid = data.frame(mtry = seq(1, 10)), 
+                  ntree = 100)
+ggplot(fit_rf, highlight = TRUE)
+# fit_rf$bestTune # mtry = 8 -> optimal value for mtry parameter
+y_hat_rf <- predict(fit_rf, test.bank, type = "raw")
+confusionMatrix(y_hat_rf, test.bank$y)$overall["Accuracy"] # 0.8398939
+cmat_rf <- confusionMatrix(y_hat_rf, test.bank$y)
+# yes is detected in many cases (high specificity: 0.9130) - due to better data balance
+# importance of variables in the random forest model
+imp <- varImp(fit_rf)
+imp
+# F-score
+f_rf <- F_meas(data = y_hat_rf, reference = test.bank$y) 
+
+model_results_bal <- add_result(model_results_bal, "Random Forest",  cmat_rf, f_rf)
+```
+
+In both cases, the duration of contact, balance, age, day and successful previous outcome are the best predictors.
+
+
+### Support vector machines (SVM) model
+
+In order to detect a proper separation between the prediction classes, we use 
+Support Vector Machines (SVM) for categorical outcomes. These models maximize the margin between class boundaries.
+An important part of the SVM model is the kernel: either a linear or a radial kernel can be used. 
+We use both kernel types separately. In addition, the gamma parameter for the radial kernel is provided. 
+The radial kernel is more suitable for this scenario, as shown below. 
+
+For the original dataset we have:
+
+```{r model-svm-orig, warning=FALSE, message=FALSE}
+# svm - original dataset
+set.seed(1, sample.kind = "Rounding")
+fit_svm <- svm(y ~ ., data = train.bank, kernel = "linear") # linear kernel
+y_hat_svm <- predict(fit_svm, test.bank)
+confusionMatrix(y_hat_svm, test.bank$y)$overall[["Accuracy"]] # 0.8911986
+# confusionMatrix(y_hat_svm, test.bank$y)
+# but yes is detected in very few cases (low specificity: 0.1796) - due to data imbalance
+fit_svmr <- svm(y ~ ., data = train.bank, kernel = "radial", 
+                gamma = 0.1) # radial kernel, choose gamma
+y_hat_svm <- predict(fit_svmr, test.bank)
+confusionMatrix(y_hat_svm, test.bank$y)$overall[["Accuracy"]] # 0.9066785
+cmat_svm <- confusionMatrix(y_hat_svm, test.bank$y)
+# but yes is detected in very few cases (low specificity: 0.3932) - due to data imbalance
+# F-score
+f_svm <- F_meas(data = y_hat_svm, reference = test.bank$y) 
+
+model_results <- add_result(model_results, "SVM", cmat_svm, f_svm)
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# store the results to use in ensemble
+y_hat_svm_orig <- y_hat_svm
+```
+
+For the more balanced dataset we have:  
+
+```{r model-svm-bal, warning=FALSE, message=FALSE}
+# svm - balanced dataset
+set.seed(1, sample.kind = "Rounding")
+fit_svm <- svm(y ~ ., data = train.balanced, kernel = "linear") # linear kernel
+y_hat_svm <- predict(fit_svm, test.bank)
+confusionMatrix(y_hat_svm, test.bank$y)$overall[["Accuracy"]] # 0.8348076
+# confusionMatrix(y_hat_svm, test.bank$y)
+# yes is detected in many cases (high specificity: 0.8507) - due to better data balance
+fit_svmr <- svm(y ~ ., data = train.balanced, kernel = "radial", 
+                gamma = 0.1) # radial kernel, choose gamma
+y_hat_svm <- predict(fit_svmr, test.bank)
+confusionMatrix(y_hat_svm, test.bank$y)$overall[["Accuracy"]] # 0.8283945
+cmat_svm <- confusionMatrix(y_hat_svm, test.bank$y)
+# yes is detected in many cases (high specificity: 0.9093) - due to better data balance
+# F-score
+f_svm <- F_meas(data = y_hat_svm, reference = test.bank$y) 
+
+model_results_bal <- add_result(model_results_bal, "SVM", cmat_svm, f_svm)
+```
+
+
+### Models based on discriminant analysis
+
+Discriminant analysis methods allow the model/algorithm to discriminate between relevant 
+classes by selecting class means and maximizing the separation of these means.
+We use both linear and quadratic discriminant models for the data.
+
+
+#### Linear discriminant analysis  
+
+
+For the original dataset we have:  
+
+```{r model-lda-orig, warning=FALSE, message=FALSE}
+# lda - original dataset
+set.seed(1, sample.kind = "Rounding")
+fit_lda <- train(y ~ ., method = "lda", data = train.bank)
+y_hat_lda <- predict(fit_lda, test.bank, type = "raw")
+confusionMatrix(y_hat_lda, test.bank$y)$overall[["Accuracy"]] # 0.9029191
+cmat_lda <- confusionMatrix(y_hat_lda, test.bank$y)
+# but yes is detected in too few cases (low specificity: 0.4820) - due to data imbalance
+# F-score
+f_lda <- F_meas(data = y_hat_lda, reference = test.bank$y) 
+
+model_results <- add_result(model_results, "LDA", cmat_lda, f_lda)
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# store the results to use in ensemble
+y_hat_lda_orig <- y_hat_lda
+```
+
+For the more balanced dataset we have:  
+
+```{r model-lda-bal, warning=FALSE, message=FALSE}
+# lda - balanced dataset
+set.seed(1, sample.kind = "Rounding")
+fit_lda <- train(y ~ ., method = "lda", data = train.balanced)
+y_hat_lda <- predict(fit_lda, test.bank, type = "raw")
+confusionMatrix(y_hat_lda, test.bank$y)$overall[["Accuracy"]] # 0.8549314
+cmat_lda <- confusionMatrix(y_hat_lda, test.bank$y)
+# yes is detected in relatively many cases (specificity: 0.8053)
+# F-score
+f_lda <- F_meas(data = y_hat_lda, reference = test.bank$y) 
+
+model_results_bal <- add_result(model_results_bal, "LDA", cmat_lda, f_lda)
+```
+
+
+#### Quadratic discriminant analysis  
+
+
+For the original dataset we have:
+
+```{r model-qda-orig, warning=FALSE, message=FALSE}
+# qda - original dataset
+set.seed(1, sample.kind = "Rounding")
+fit_qda <- train(y ~ ., method = "qda", data = train.bank)
+y_hat_qda <- predict(fit_qda, test.bank, type = "raw")
+confusionMatrix(y_hat_qda, test.bank$y)$overall[["Accuracy"]] # 0.8690845
+cmat_qda <- confusionMatrix(y_hat_qda, test.bank$y)
+# but yes is detected in too few cases (low specificity: 0.5047) - due to data imbalance
+# F-score
+f_qda <- F_meas(data = y_hat_qda, reference = test.bank$y) 
+
+model_results <- add_result(model_results, "QDA", cmat_qda, f_qda)
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# store the results to use in ensemble
+y_hat_qda_orig <- y_hat_qda
+```
+
+For the more balanced dataset we have:  
+
+```{r model-qda-bal, warning=FALSE, message=FALSE}
+# qda - balanced dataset
+set.seed(1, sample.kind = "Rounding")
+fit_qda <- train(y ~ ., method = "qda", data = train.balanced)
+y_hat_qda <- predict(fit_qda, test.bank, type = "raw")
+confusionMatrix(y_hat_qda, test.bank$y)$overall[["Accuracy"]] # 0.8533835
+cmat_qda <- confusionMatrix(y_hat_qda, test.bank$y)
+# yes is detected in relatively few cases (specificity: 0.5784)
+# F-score
+f_qda <- F_meas(data = y_hat_qda, reference = test.bank$y) 
+
+model_results_bal <- add_result(model_results_bal, "QDA", cmat_qda, f_qda)
+```
+
+
+### K-Nearest Neighbors (KNN) model  
+
+
+With K-nearest neighbors we use for a given customer the outcomes of its k nearest neighbors to predict the outcome class. The value of _k_ is usually tuned and model performance can be improved by combining tuning with cross-validation. The model also requires a distance metric - to define what is "near".
+
+For the original dataset we have:
+
+```{r model-knn-orig, warning=FALSE, message=FALSE}
+# knn - original dataset
+# using cross-validation to find the value of k (number of neighbors used)
+set.seed(8, sample.kind = "Rounding")
+control <- trainControl(method = "cv", number = 10)
+# use 10-fold cross validation -> each partition consists of 10% of the total
+# train_knn_cv <- train(y ~ ., method = "knn", data = train.bank, 
+#                       tuneGrid = data.frame(k = seq(3, 51, 2)),
+#                       trControl = control)
+# training with reduced dataset (bank.small)
+train_knn_cv <- train(y ~ ., method = "knn", data = bank.small, 
+                      tuneGrid = data.frame(k = seq(3, 51, 2)),
+                      trControl = control)
+# ggplot(train_knn_cv, highlight = TRUE)
+# train_knn_cv$bestTune # k = 37 -> optimal value for the number of neighbors
+y_hat_knn_cv <- predict(train_knn_cv, test.bank, type = "raw")
+confusionMatrix(y_hat_knn_cv, test.bank$y)$overall["Accuracy"] # 0.8865546
+cmat_knn_cv <- confusionMatrix(y_hat_knn_cv, test.bank$y)
+# but yes is detected in few cases (low specificity: 0.1210) - due to data imbalance
+# F-score
+f_knn_cv <- F_meas(data = y_hat_knn_cv, reference = test.bank$y) 
+
+model_results <- add_result(model_results, "KNN (with CV)",  cmat_knn_cv, 
+                            f_knn_cv)
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# store the results to use in ensemble
+y_hat_knn_cv_orig <- y_hat_knn_cv
+```
+
+For the more balanced dataset we have:
+
+```{r model-knn-bal, warning=FALSE, message=FALSE}
+# knn - balanced dataset
+# using cross-validation to find the value of k (number of neighbors used)
+set.seed(8, sample.kind = "Rounding")
+control <- trainControl(method = "cv", number = 10)
+# use 10-fold cross validation -> each partition consists of 10% of the total
+# training with balanced dataset
+train_knn_cv <- train(y ~ ., method = "knn", data = train.balanced, 
+                     tuneGrid = data.frame(k = seq(3, 51, 2)),
+                     trControl = control)
+ggplot(train_knn_cv, highlight = TRUE)
+# train_knn_cv$bestTune # k = 27 -> optimal value for the number of neighbors
+y_hat_knn_cv <- predict(train_knn_cv, test.bank, type = "raw")
+confusionMatrix(y_hat_knn_cv, test.bank$y)$overall["Accuracy"] # 0.7720035
+cmat_knn_cv <- confusionMatrix(y_hat_knn_cv, test.bank$y)
+# yes is detected in relatively many cases (specificity: 0.7543)
+# F-score
+f_knn_cv <- F_meas(data = y_hat_knn_cv, reference = test.bank$y) 
+
+model_results_bal <- add_result(model_results_bal, "KNN (with CV)",  cmat_knn_cv, 
+                                f_knn_cv)
+```
+
+### Ensemble
+
+Ensemble methods work by aggregating prediction results from different models. Then amjority vote is used to generate the final outcome of the ensemble. It may improve model performance by averaging multiple results and cancelling out errors, but this is not always the case.
+
+For the bank marketing data and our models, the ensemble model doesn't improve results significantly. 
+Performance metrics can be found in the next section.
+
+```{r model-ensemble, echo=FALSE, warning=FALSE, message=FALSE}
+# ensemble - original dataset
+# Note: the y_hat result last stored are always those for the balanced dataset - we will use them
+y_hat_models_orig <- data.frame( cbind(y_hat_glm_orig, y_hat_cl_tree_orig, y_hat_rf_orig, y_hat_knn_cv_orig, 
+                                  y_hat_lda_orig, y_hat_qda_orig, y_hat_svm_orig) )
+y_hat_ensemble_orig <- apply(y_hat_models_orig, 1, function(y_hat){
+  # ifelse( mean(y_hat == "yes") > 0.5, "yes", "no")
+  ifelse( mean(y_hat == "2") > 0.5, "yes", "no") # 'positive' class is no:1; yes:2
+})
+y_hat_ensemble_orig <- as.factor(y_hat_ensemble_orig)
+# confusion matrix
+cmat_ens_orig <- confusionMatrix(y_hat_ensemble_orig, test.bank$y)
+# cmat_ens_orig
+# F-score
+f_ens_orig <- F_meas(data = y_hat_ensemble_orig, reference = test.bank$y) 
+
+model_results <- add_result(model_results, "Ensemble (w/o naive)",  cmat_ens_orig, f_ens_orig)
+
+
+# ensemble - balanced dataset
+# Note: the y_hat result last stored are always those for the balanced dataset - we will use them
+y_hat_models <- data.frame( cbind(y_hat_glm, y_hat_cl_tree, y_hat_rf, y_hat_knn_cv, 
+                                   y_hat_lda, y_hat_qda, y_hat_svm) )
+y_hat_ensemble <- apply(y_hat_models, 1, function(y_hat){
+  # ifelse( mean(y_hat == "yes") > 0.5, "yes", "no")
+  ifelse( mean(y_hat == "2") > 0.5, "yes", "no") # 'positive' class is no:1; yes:2
+})
+y_hat_ensemble <- as.factor(y_hat_ensemble)
+# confusion matrix
+cmat_ens <- confusionMatrix(y_hat_ensemble, test.bank$y)
+# cmat_ens
+# F-score
+f_ens <- F_meas(data = y_hat_ensemble, reference = test.bank$y) 
+
+model_results_bal <- add_result(model_results_bal, "Ensemble (w/o naive)",  cmat_ens, f_ens)
+```
+
+## Results
+
+The following table shows various metrics which are relevant for classification problems:
+
+* accuracy ($\dfrac{TP + TN}{TP + TN + FP + FN}$)
+* sensitivity ($\dfrac{TP}{TP + FN}$)
+* specificity ($\dfrac{TN}{FP + TN}$)
+* balanced accuracy ($\dfrac{sensitivity + specificity}{2}$) 
+* F-score (combines precision and recall)
+
+
+For the original dataset we have the following results:
+
+```{r model-comparison, echo=FALSE, warning=FALSE, message=FALSE}
+model_results %>% knitr::kable()
+```
+
+The more balanced dataset provides the following metrics:
+
+```{r model-comparison-bal, echo=FALSE, warning=FALSE, message=FALSE}
+model_results_bal %>% knitr::kable()
+```
+
+In the models built with R the "positive" class is "no", but we are mainly interested
+in "yes" for business outcome (customer accepts offer). The data imbalance present in the original data 
+must also be taken into account for evaluation.
+
+Therefore, from a business perspective the most suitable algorithms seem to be Random forest/classification trees and SVM. These models show a high balanced accuracy and also high specificity. High specificity means for this setting that more potential "yes" customers
+will be targeted.
+
+## Conclusion
+
+We explored the Bank marketing data and we tested different approaches for customer response classification. 
+Tree-based models and Support Vector Machines proved the most effective and delivered the best balanced accuracy for the intended results. 
+Nonetheless, such models are also computationally expensive for large amounts of data.  
+
+Beside the methods used in this analysis, promising alternatives could be neural networks or time-series methods. These may capture more complex relations between features and also time-related effects.  
+
+However, in any real-world scenario the available data and its structure, domain knowledge and the business goals need to be taken 
+into account for model selection and later for best performance during deployment.
+
+
+## References
